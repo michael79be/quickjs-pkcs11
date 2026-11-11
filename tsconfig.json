@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "ignoreDeprecations": "6.0",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "./",
+    "outDir": "./dist",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "src",
+    "quickjs-native/src/types",
+    "node_modules",
+    "rollup.config.ts"
+  ]
+}
