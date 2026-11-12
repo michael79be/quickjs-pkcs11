@@ -7,15 +7,12 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "rootDir": "./",
+    "rootDir": "./src",
     "outDir": "./dist",
     "declaration": false,
     "sourceMap": false
   },
   "include": [
-    "src",
-    "quickjs-native/src/types",
-    "node_modules",
-    "rollup.config.ts"
+    "src/index.ts"
   ]
 }
