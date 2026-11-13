@@ -8,10 +8,15 @@ QuickJS Native PKCS#11 bindings.
 import { PKCS11 } from 'quickjs-pkcs11';
 
 const pkcs11 = new PKCS11();
-const initResult = pkcs11.C_Initialize();
-const { result: infoResult, info } = pkcs11.getInfo();
+if (pkcs11.isInitialized()) {
+    const info = pkcs11.getInfo();
+}
 pkcs11.destroy();
 ```
+
+The constructor initializes the PKCS#11 library and throws if initialization
+fails. `getInfo()` returns parsed library information or `null` if the call
+fails. `isInitialized()` reports whether the instance is currently initialized.
 
 Without a path, the constructor searches common system library directories for
 a filename containing `pkcs11` with the platform extension (`.dylib`, `.so`,
