@@ -15,24 +15,20 @@ const tokens = pkcs11.getSlots(false);
 const safeTokens = tokens ? tokens.map(t => ({ ...t, flags: t.flags.toString() })) : null;
 console.log('All tokens:', safeTokens ? JSON.stringify(safeTokens) : null);
 
-const tokenOnly = pkcs11.getSlots(true);
-const safeTokenOnly = tokenOnly ? tokenOnly.map(t => ({ ...t, flags: t.flags.toString() })) : null;
-console.log('Token-only tokens:', safeTokenOnly ? JSON.stringify(safeTokenOnly) : null);
-
-// Session + find objects on slot 0
+// Session + find certificates/data on slot 0
 const slotIds = pkcs11.getSlotIds(false);
 console.log('Slot IDs:', slotIds);
 
 if (slotIds && slotIds.length > 0) {
-    for (const rw of [false, true]) {
-        const session = pkcs11.openSession(slotIds[0], rw);
-        console.log(`Session (rw=${rw}):`, session);
-        if (session !== null) {
-            const certHandles = pkcs11.findObjectsByClass(session, PKCS11.CKO_CERTIFICATE);
-            console.log(`Certificate handles (rw=${rw}):`, certHandles);
-            pkcs11.closeSession(session);
-            console.log(`Session closed (rw=${rw})`);
-        }
+    const session = pkcs11.openSession(slotIds[0], false);
+    console.log('Session:', session);
+    if (session !== null) {
+        const certs = pkcs11.getCertificates(session);
+        console.log('Certificates:', certs ? JSON.stringify(certs, null, '  ') : null);
+        const data = pkcs11.getData(session);
+        console.log('Data objects:', data ? JSON.stringify(data, null, '  ') : null);
+        pkcs11.closeSession(session);
+        console.log('Session closed');
     }
 }
 

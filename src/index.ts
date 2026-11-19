@@ -69,7 +69,7 @@ export class PKCS11 {
     public static readonly CKO_SECRET_KEY = 0x00000004;
 
     /** Session flags */
-    public static readonly CKF_SERIAL_SESSION = 0x00000001;
+    public static readonly CKF_SERIAL_SESSION = 0x00000004;
     public static readonly CKF_RW_SESSION = 0x00000002;
 
     /** Attribute types */
@@ -84,6 +84,9 @@ export class PKCS11 {
     public static readonly CKA_URL = 0x00000089;
 
     public static readonly CK_UNAVAILABLE_INFORMATION = 0xFFFFFFFF;
+
+    /** Byte size above which buffers are base64-encoded instead of hex */
+    private static readonly BASE64_THRESHOLD = 32;
     private static readonly searchDirectories: Record<string, string[]> = {
         darwin: [
             '/Library/Belgium Identity Card/Pkcs11',
@@ -133,7 +136,9 @@ export class PKCS11 {
             C_FindObjectsInit: 'number',
             C_FindObjects: 'number',
             C_FindObjectsFinal: 'number',
-            C_GetAttributeValue: 'number'
+            C_GetAttributeValue: 'number',
+            C_Login: 'number',
+            C_Logout: 'number'
         });
 
         const result = this.library.C_Initialize([null]);
@@ -232,6 +237,7 @@ export class PKCS11 {
 
     /**
      * Initializes a search for objects matching the given attribute template.
+     * attributeTypes and attributeValues must be parallel arrays.
      * When attributeTypes is empty, all objects are matched.
      * Returns true on success.
      */
@@ -241,36 +247,66 @@ export class PKCS11 {
         const templateBuffer = new ArrayBuffer(count * attributeSize);
         const view = new DataView(templateBuffer);
 
+        const mallocPtrs: number[] = [];
         for (let i = 0; i < count; i++) {
             const offset = i * attributeSize;
             view.setUint32(offset, attributeTypes[i], true); // type
-            view.setBigUint64(offset + this.ckULongSize, 0n, true); // pValue = NULL
-            view.setBigUint64(offset + 2 * this.ckULongSize, 0n, true); // ulValueLen = 0
+            const value = attributeValues[i];
+            if (value === undefined || value === null) {
+                view.setBigUint64(offset + this.ckULongSize, 0n, true); // pValue = NULL
+                view.setBigUint64(offset + 2 * this.ckULongSize, 0n, true); // ulValueLen = 0
+                mallocPtrs.push(0);
+                continue;
+            }
+
+            // Allocate native memory for the CK_ULONG value and write it
+            const ptr = this._malloc(this.ckULongSize);
+            if (!ptr) {
+                // Free already allocated pointers
+                for (const p of mallocPtrs) if (p) this._free(p);
+                return false;
+            }
+            this.writeUnsigned(new ArrayBuffer(this.ckULongSize), 0, value, this.ckULongSize);
+            // Can't copy into malloc'd memory without memcpy; use _memcpy with a temp buffer
+            const tempBuf = new ArrayBuffer(this.ckULongSize);
+            this.writeUnsigned(tempBuf, 0, value, this.ckULongSize);
+            this._memcpy(ptr, tempBuf, this.ckULongSize);
+            view.setBigUint64(offset + this.ckULongSize, BigInt(ptr), true); // pValue
+            view.setBigUint64(offset + 2 * this.ckULongSize, BigInt(this.ckULongSize), true); // ulValueLen
+            mallocPtrs.push(ptr);
         }
 
         const result = this.library.C_FindObjectsInit([session, templateBuffer, count]);
+
+        // Free allocated value buffers (the library has copied what it needs)
+        for (const ptr of mallocPtrs) {
+            if (ptr) this._free(ptr);
+        }
+
         return result === PKCS11.success;
     }
 
     /**
      * Finds objects matching the initialized search template.
-     * @param maxCount - maximum number of object handles to return.
-     * Returns the list of object handles, or null on failure.
+     * @param maxCount - maximum number of object handles per call.
+     * Returns the list of all object handles, or null on failure.
      */
     findObjects(session: number, maxCount: number): number[] | null {
-        const objectBuffer = new ArrayBuffer(maxCount * this.ckULongSize);
-        const countBuffer = new ArrayBuffer(this.ckULongSize);
-        const result = this.library.C_FindObjects([session, objectBuffer, maxCount, countBuffer]);
-        if (result !== PKCS11.success) {
-            return null;
-        }
-        const count = Number(this.readUnsigned(countBuffer, 0, this.ckULongSize));
-        if (count === 0) {
-            return [];
-        }
         const objects: number[] = [];
-        for (let i = 0; i < count; i++) {
-            objects.push(Number(this.readUnsigned(objectBuffer, i * this.ckULongSize, this.ckULongSize)));
+        while (true) {
+            const objectBuffer = new ArrayBuffer(maxCount * this.ckULongSize);
+            const countBuffer = new ArrayBuffer(this.ckULongSize);
+            const result = this.library.C_FindObjects([session, objectBuffer, maxCount, countBuffer]);
+            if (result !== PKCS11.success) {
+                return null;
+            }
+            const count = Number(this.readUnsigned(countBuffer, 0, this.ckULongSize));
+            if (count === 0) {
+                break;
+            }
+            for (let i = 0; i < count; i++) {
+                objects.push(Number(this.readUnsigned(objectBuffer, i * this.ckULongSize, this.ckULongSize)));
+            }
         }
         return objects;
     }
@@ -282,16 +318,18 @@ export class PKCS11 {
     }
 
     /**
-     * Retrieves attribute value sizes for an object via C_GetAttributeValue.
-     * Returns a map of attribute hex key to value length, or null on failure.
-     * Actual data retrieval requires ArrayBuffer pointer support in the FFI.
+     * Retrieves attribute values for an object as a map of attribute hex key to value.
+     * Numeric attributes (CKA_CLASS) are returned as numbers; UTF-8 strings (CKA_LABEL)
+     * as strings; byte arrays (CKA_VALUE, CKA_ISSUER, etc.) as hex strings.
+     * Uses the two-phase C_GetAttributeValue call: first query sizes, then read data.
      */
-    getAttributeValueSize(session: number, object: number, attributeTypes: number[]): Record<string, number> | null {
+    getAttributeValue(session: number, object: number, attributeTypes: number[], asText: boolean = false): Record<string, string | number> | null {
         const count = attributeTypes.length;
         const attributeSize = 3 * this.ckULongSize;
+
+        // Phase 1: query value sizes with pValue = NULL
         const templateBuffer = new ArrayBuffer(count * attributeSize);
         const view = new DataView(templateBuffer);
-
         for (let i = 0; i < count; i++) {
             const offset = i * attributeSize;
             view.setUint32(offset, attributeTypes[i], true); // type
@@ -299,33 +337,168 @@ export class PKCS11 {
             view.setBigUint64(offset + 2 * this.ckULongSize, 0n, true); // ulValueLen = 0
         }
 
-        const result = this.library.C_GetAttributeValue([session, object, templateBuffer, count]);
+        let result = this.library.C_GetAttributeValue([session, object, templateBuffer, count]);
         if (result !== PKCS11.success) {
             return null;
         }
 
-        const sizes: Record<string, number> = {};
+        const sizes: number[] = [];
         for (let i = 0; i < count; i++) {
             const offset = i * attributeSize;
+            const valueLen = Number(view.getBigUint64(offset + 2 * this.ckULongSize, true));
+            sizes.push(valueLen === PKCS11.CK_UNAVAILABLE_INFORMATION ? -1 : valueLen);
+        }
+
+        // Phase 2: allocate buffers and read values
+        const buffers: (ArrayBuffer | null)[] = [];
+        const mallocPtrs: number[] = [];
+        for (let i = 0; i < count; i++) {
+            const len = sizes[i];
+            if (len <= 0) {
+                buffers.push(null);
+                mallocPtrs.push(0);
+                continue;
+            }
+            const ptr = this._malloc(len);
+            if (!ptr) {
+                buffers.push(null);
+                mallocPtrs.push(0);
+                continue;
+            }
+            const offset = i * attributeSize;
+            view.setBigUint64(offset + this.ckULongSize, BigInt(ptr), true); // pValue = malloc'd pointer
+            view.setBigUint64(offset + 2 * this.ckULongSize, BigInt(len), true); // ulValueLen
+            buffers.push(new ArrayBuffer(len));
+            mallocPtrs.push(ptr);
+        }
+
+        result = this.library.C_GetAttributeValue([session, object, templateBuffer, count]);
+        if (result !== PKCS11.success) {
+            for (const ptr of mallocPtrs) {
+                if (ptr) this._free(ptr);
+            }
+            return null;
+        }
+
+        const output: Record<string, string | number> = {};
+        for (let i = 0; i < count; i++) {
             const type = attributeTypes[i];
             const key = `0x${type.toString(16).padStart(8, '0')}`;
-            const valueLen = Number(view.getBigUint64(offset + 2 * this.ckULongSize, true));
-            sizes[key] = valueLen === PKCS11.CK_UNAVAILABLE_INFORMATION ? -1 : valueLen;
+            const len = sizes[i];
+            const buf = buffers[i];
+            const ptr = mallocPtrs[i];
+
+            if (!buf || len <= 0 || len === -1) {
+                // Attribute unavailable on this object (e.g. CKA_VALUE on public keys); skip it
+                if (ptr) this._free(ptr);
+                continue;
+            }
+
+            // Copy from malloc'd memory into the JS ArrayBuffer
+            this._memcpy(buf, ptr, len);
+            this._free(ptr);
+
+            // Interpret based on attribute type
+            if (type === PKCS11.CKA_CLASS) {
+                output[key] = Number(this.readUnsigned(buf, 0, this.ckULongSize));
+            } else if (type === PKCS11.CKA_LABEL) {
+                output[key] = this.readFixedUTF8(buf, 0, len);
+            } else if (type === PKCS11.CKA_VALUE) {
+                output[key] = asText ? this.readFixedUTF8(buf, 0, len) : this.encodeBuffer(buf);
+            } else if (len <= this.ckULongSize) {
+                output[key] = Number(this.readUnsigned(buf, 0, len as unknown as ULongSize));
+            } else {
+                output[key] = this.encodeBuffer(buf);
+            }
         }
-        return sizes;
+        return output;
     }
 
     /**
      * Convenience: finds all certificates (CKO_CERTIFICATE) or data objects (CKO_DATA)
-     * in the given session and returns their object handles.
+     * in the given session and returns their attributes.
      */
     findObjectsByClass(session: number, objectClass: number = PKCS11.CKO_CERTIFICATE): number[] | null {
-        if (!this.findObjectsInit(session, [PKCS11.CKA_CLASS], [])) {
+        if (!this.findObjectsInit(session, [PKCS11.CKA_CLASS], [objectClass])) {
             return null;
         }
         const handles = this.findObjects(session, 16);
         this.findObjectsFinal(session);
         return handles;
+    }
+
+    /**
+     * Generic: retrieves CKA_LABEL and CKA_VALUE for any object in the given session.
+     * Returns a map with hex attribute keys to values, or null on failure.
+     */
+    getObjectAttributes(session: number, object: number): Record<string, string | number> | null {
+        return this.getAttributeValue(session, object, [
+            PKCS11.CKA_LABEL,
+            PKCS11.CKA_VALUE
+        ]);
+    }
+
+    /**
+     * Convenience: finds all certificates (CKO_CERTIFICATE) in the given session
+     * and returns their attributes as key/value maps using the CKA_LABEL as key
+     * and the base64-encoded CKA_VALUE as value.
+     */
+    getCertificates(session: number): Record<string, string | number> | null {
+        const handles = this.findObjectsByClass(session, PKCS11.CKO_CERTIFICATE);
+        if (!handles) {
+            return null;
+        }
+        const results: Record<string, string | number> = {};
+        const valueKey = `0x${PKCS11.CKA_VALUE.toString(16).padStart(8, '0')}`;
+        for (const handle of handles) {
+            const attrs = this.getAttributeValue(session, handle, [
+                PKCS11.CKA_LABEL,
+                PKCS11.CKA_VALUE
+            ]);
+            if (attrs) {
+                const labelKey = `0x${PKCS11.CKA_LABEL.toString(16).padStart(8, '0')}`;
+                const label = attrs[labelKey];
+                const value = attrs[valueKey];
+                if (typeof label === 'string' && typeof value === 'string') {
+                    results[label] = value;
+                }
+            }
+        }
+        return Object.keys(results).length > 0 ? results : null;
+    }
+
+    /**
+     * Convenience: finds all data objects (CKO_DATA) in the given session
+     * and returns their attributes as key/value maps.
+     * Tries a class-based search (CKA_CLASS=CKO_DATA); if the library does
+     * not return any objects that way, falls back to scanning all objects.
+     * No PIN is required to read public data objects on Belgium eID cards.
+     */
+    getData(session: number): Record<string, string | number> | null {
+        const handles = this.findObjectsByClass(session, PKCS11.CKO_DATA);
+        if (handles && handles.length > 0) {
+            const results: Record<string, string | number> = {};
+            for (const handle of handles) {
+                const attrs = this.getAttributeValue(session, handle, [
+                    PKCS11.CKA_LABEL,
+                    PKCS11.CKA_VALUE
+                ], true);
+                if (attrs) {
+                    const labelKey = `0x${PKCS11.CKA_LABEL.toString(16).padStart(8, '0')}`;
+                    const valueKey = `0x${PKCS11.CKA_VALUE.toString(16).padStart(8, '0')}`;
+                    const label = attrs[labelKey];
+                    const value = attrs[valueKey];
+            if (typeof label === 'string' && typeof value === 'string') {
+                const encoded = this.getAttributeValue(session, handle, [PKCS11.CKA_VALUE], false);
+                const encodedValue = encoded ? encoded[valueKey] : value;
+                results[label] = this.isPrintableText(value) ? value : encodedValue;
+            }
+                }
+            }
+            return Object.keys(results).length > 0 ? results : null;
+        }
+
+        return null;
     }
 
     getLibraries(): string[] {
@@ -381,18 +554,39 @@ export class PKCS11 {
         };
     }
 
+    private isPrintableText(s: string): boolean {
+        for (let i = 0; i < s.length; i++) {
+            const code = s.charCodeAt(i);
+            if (code < 0x20 && code !== 0x09 && code !== 0x0A && code !== 0x0D) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private readFixedUTF8(buffer: ArrayBuffer, offset: number, length: number): string {
         const bytes = new Uint8Array(buffer, offset, length);
         let end = bytes.length;
         while (end > 0 && (bytes[end - 1] === 0 || bytes[end - 1] === 0x20)) {
             end--;
         }
-
-        let encoded = '';
-        for (let index = 0; index < end; index++) {
-            encoded += `%${bytes[index].toString(16).padStart(2, '0')}`;
+        if (end === 0) {
+            return '';
         }
-        return decodeURIComponent(encoded);
+        try {
+            let encoded = '';
+            for (let index = 0; index < end; index++) {
+                encoded += `%${bytes[index].toString(16).padStart(2, '0')}`;
+            }
+            return decodeURIComponent(encoded);
+        } catch {
+            // Fallback: Latin-1 (each byte maps 1:1 to a character, never throws)
+            let result = '';
+            for (let index = 0; index < end; index++) {
+                result += String.fromCharCode(bytes[index]);
+            }
+            return result;
+        }
     }
 
     private readUnsigned(buffer: ArrayBuffer, offset: number, length: ULongSize): bigint {
@@ -414,6 +608,27 @@ export class PKCS11 {
             const byteIndex = littleEndian ? offset + index : offset + length - index - 1;
             view.setUint8(byteIndex, Number((bigIntValue >> BigInt(index * 8)) & 0xffn));
         }
+    }
+
+    private encodeBuffer(buf: ArrayBuffer): string {
+        const bytes = new Uint8Array(buf);
+        if (bytes.length <= PKCS11.BASE64_THRESHOLD) {
+            let hex = '';
+            for (let b of bytes) hex += b.toString(16).padStart(2, '0');
+            return hex;
+        }
+        let base64 = '';
+        for (let i = 0; i < bytes.length; i += 3) {
+            const b0 = bytes[i];
+            const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+            const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+            const triplet = (b0 << 16) | (b1 << 8) | b2;
+            base64 += 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.charAt((triplet >> 18) & 0x3f);
+            base64 += 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.charAt((triplet >> 12) & 0x3f);
+            base64 += i + 1 < bytes.length ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.charAt((triplet >> 6) & 0x3f) : '=';
+            base64 += i + 2 < bytes.length ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.charAt(triplet & 0x3f) : '=';
+        }
+        return base64;
     }
 
     private readInfo(buffer: ArrayBuffer): PKCS11Info {
@@ -621,7 +836,7 @@ export class PKCS11 {
         return ret || null;
     }
 
-    private _memcpy(dst: number, src: number, size: number): void {
+    private _memcpy(dst: unknown, src: unknown, size: number): void {
         if (!this._ensureLibc() || !this._memcpyAddr) {
             return;
         }

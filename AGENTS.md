@@ -25,6 +25,7 @@ The test connects to the Belgium eID PKCS#11 library and reports slots. It expec
 ## Developing
 
 - `src/index.ts` — PKCS#11 bindings (`C_Initialize`, `C_Finalize`, `C_GetInfo`, `C_GetSlotList`, `C_GetTokenInfo`, `C_OpenSession`, `C_CloseSession`, `C_FindObjectsInit`, `C_FindObjects`, `C_FindObjectsFinal`, `C_GetAttributeValue`).
+- `src/test.ts` — test script (untracked, not in package.json) for Belgium eID library.
 - `tsconfig.json` — `include: ["src/index.ts"]`, so `tsc` type-checks only the package source.
 - `package.json` — `main: ./dist/index.js`, `types: ./dist/types/index.d.ts`.
 
