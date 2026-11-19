@@ -17,6 +17,7 @@ interface PKCS11Info {
 }
 
 interface TokenInfo {
+    id?: number;
     label: string;
     manufacturerID: string;
     model: string;
@@ -157,10 +158,11 @@ export class PKCS11 {
     }
 
     /**
-     * Returns the list of slot IDs, or null if C_GetSlotList fails.
+     * Returns the list of token infos, or null if C_GetSlotList fails.
      * When tokenPresent is true, only slots containing a token are returned.
+     * Each TokenInfo includes an `id` property with the slot ID.
      */
-    public getSlotIds(tokenPresent: boolean = false): number[] | null {
+    getSlots(tokenPresent: boolean = false): TokenInfo[] | null {
         const countBuffer = new ArrayBuffer(this.ckULongSize);
         const result = this.library.C_GetSlotList([tokenPresent, null, countBuffer]);
         if (result !== PKCS11.success) {
@@ -178,28 +180,12 @@ export class PKCS11 {
             return null;
         }
 
-        const slots: number[] = [];
-        for (let index = 0; index < count; index++) {
-            slots.push(Number(this.readUnsigned(slotBuffer, index * this.ckULongSize, this.ckULongSize)));
-        }
-        return slots;
-    }
-
-    /**
-     * Returns the list of token infos, or null if C_GetSlotList fails.
-     * When tokenPresent is true, only slots containing a token are returned.
-     */
-    getSlots(tokenPresent: boolean = false): TokenInfo[] | null {
-        const slotIds = this.getSlotIds(tokenPresent);
-        if (slotIds === null) {
-            return null;
-        }
-
         const tokens: TokenInfo[] = [];
-        for (const slot of slotIds) {
-            const tokenInfo = this.getTokenInfo(slot);
+        for (let index = 0; index < count; index++) {
+            const slotId = Number(this.readUnsigned(slotBuffer, index * this.ckULongSize, this.ckULongSize));
+            const tokenInfo = this.getTokenInfo(slotId);
             if (tokenInfo !== null) {
-                tokens.push(tokenInfo);
+                tokens.push({ ...tokenInfo, id: slotId });
             }
         }
         return tokens;

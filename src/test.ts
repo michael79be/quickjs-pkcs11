@@ -11,16 +11,12 @@ const info = pkcs11.getInfo();
 const safeInfo = info ? { ...info, flags: info.flags.toString() } : null;
 console.log('Info:', safeInfo ? JSON.stringify(safeInfo) : null);
 
-const tokens = pkcs11.getSlots(false);
-const safeTokens = tokens ? tokens.map(t => ({ ...t, flags: t.flags.toString() })) : null;
-console.log('All tokens:', safeTokens ? JSON.stringify(safeTokens) : null);
-
 // Session + find certificates/data on slot 0
-const slotIds = pkcs11.getSlotIds(false);
-console.log('Slot IDs:', slotIds);
+const slots = pkcs11.getSlots(false);
+console.log('Slots:', slots ? JSON.stringify(slots.map(s => ({ id: s.id, label: s.label }))) : null);
 
-if (slotIds && slotIds.length > 0) {
-    const session = pkcs11.openSession(slotIds[0], false);
+if (slots && slots.length > 0) {
+    const session = pkcs11.openSession(slots[0].id, false);
     console.log('Session:', session);
     if (session !== null) {
         const certs = pkcs11.getCertificates(session);
