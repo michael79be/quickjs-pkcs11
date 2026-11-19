@@ -10,13 +10,16 @@ import { PKCS11 } from 'quickjs-pkcs11';
 const pkcs11 = new PKCS11();
 if (pkcs11.isInitialized()) {
     const info = pkcs11.getInfo();
+    const slots = pkcs11.getSlotList(false);
 }
 pkcs11.destroy();
 ```
 
 The constructor initializes the PKCS#11 library and throws if initialization
 fails. `getInfo()` returns parsed library information or `null` if the call
-fails. `isInitialized()` reports whether the instance is currently initialized.
+fails. `getSlotList(tokenPresent = false)` returns the list of slot IDs or
+`null` if the call fails; pass `true` to return only slots containing a token.
+`isInitialized()` reports whether the instance is currently initialized.
 
 Without a path, the constructor searches common system library directories for
 a filename containing `pkcs11` with the platform extension (`.dylib`, `.so`,

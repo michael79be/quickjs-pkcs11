@@ -24,6 +24,7 @@ type PKCS11FunctionDefinitions = {
     C_Initialize: 'number';
     C_Finalize: 'number';
     C_GetInfo: 'number';
+    C_GetSlotList: 'number';
 };
 
 type PKCS11Functions = LoadedNativeLibrary<PKCS11FunctionDefinitions>;
@@ -72,7 +73,8 @@ export class PKCS11 {
         this.library = loadLibrary(libraryPaths, {
             C_Initialize: 'number',
             C_Finalize: 'number',
-            C_GetInfo: 'number'
+            C_GetInfo: 'number',
+            C_GetSlotList: 'number'
         });
 
         const result = this.library.C_Initialize([null]);
@@ -88,6 +90,35 @@ export class PKCS11 {
         const buffer = new ArrayBuffer(this.getInfoLayout().size);
         const result = this.library.C_GetInfo([buffer]);
         return result === PKCS11.success ? this.readInfo(buffer) : null;
+    }
+
+    /**
+     * Returns the list of slot IDs, or null if C_GetSlotList fails.
+     * When tokenPresent is true, only slots containing a token are returned.
+     */
+    getSlotList(tokenPresent: boolean = false): number[] | null {
+        const countBuffer = new ArrayBuffer(this.ckULongSize);
+        const result = this.library.C_GetSlotList([tokenPresent, null, countBuffer]);
+        if (result !== PKCS11.success) {
+            return null;
+        }
+
+        const count = Number(this.readUnsigned(countBuffer, 0, this.ckULongSize));
+        if (count === 0) {
+            return [];
+        }
+
+        const slotBuffer = new ArrayBuffer(count * this.ckULongSize);
+        const listResult = this.library.C_GetSlotList([tokenPresent, slotBuffer, countBuffer]);
+        if (listResult !== PKCS11.success) {
+            return null;
+        }
+
+        const slots: number[] = [];
+        for (let index = 0; index < count; index++) {
+            slots.push(Number(this.readUnsigned(slotBuffer, index * this.ckULongSize, this.ckULongSize)));
+        }
+        return slots;
     }
 
     getLibraries(): string[] {
