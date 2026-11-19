@@ -15,16 +15,16 @@ Builds `dist/index.js` (the package) and `dist/types/index.d.ts`.
 Compile and bundle `src/test.ts` into a standalone executable:
 
 ```shell
-npx run build -- --input src/test.ts
-npx quickjs-native bundle dist/test.js --output-dir /tmp/pkcs11-test
-/tmp/pkcs11-test/test-macos-universal
+npx rollup --config rollup.config.ts --configPlugin typescript --input src/test.ts
+npx quickjs-native bundle dist/test.js --output-dir /tmp/kilo-pkcs11-test
+/tmp/kilo-pkcs11-test/test-macos-universal
 ```
 
-The test connects to the Belgium eID PKCS#11 library and reports slots. It expects slot `0` (the reader) and an empty token list when no card is inserted.
+The test connects to the Belgium eID PKCS#11 library and reports slots. It expects slot `0` (the reader) and token information when a card is inserted.
 
 ## Developing
 
-- `src/index.ts` — PKCS#11 bindings (`C_Initialize`, `C_Finalize`, `C_GetInfo`, `C_GetSlotList`).
+- `src/index.ts` — PKCS#11 bindings (`C_Initialize`, `C_Finalize`, `C_GetInfo`, `C_GetSlotList`, `C_GetTokenInfo`, `C_OpenSession`, `C_CloseSession`, `C_FindObjectsInit`, `C_FindObjects`, `C_FindObjectsFinal`, `C_GetAttributeValue`).
 - `tsconfig.json` — `include: ["src/index.ts"]`, so `tsc` type-checks only the package source.
 - `package.json` — `main: ./dist/index.js`, `types: ./dist/types/index.d.ts`.
 

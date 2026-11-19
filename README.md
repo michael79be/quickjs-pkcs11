@@ -10,16 +10,27 @@ import { PKCS11 } from 'quickjs-pkcs11';
 const pkcs11 = new PKCS11();
 if (pkcs11.isInitialized()) {
     const info = pkcs11.getInfo();
-    const slots = pkcs11.getSlotList(false);
+    const tokens = pkcs11.getSlots(false);
+    const session = pkcs11.openSession(0);
+    if (session !== null) {
+        const handles = pkcs11.findObjectsByClass(session, PKCS11.CKO_CERTIFICATE);
+        pkcs11.closeSession(session);
+    }
 }
 pkcs11.destroy();
 ```
 
 The constructor initializes the PKCS#11 library and throws if initialization
 fails. `getInfo()` returns parsed library information or `null` if the call
-fails. `getSlotList(tokenPresent = false)` returns the list of slot IDs or
+fails. `getSlots(tokenPresent = false)` returns the list of token infos or
 `null` if the call fails; pass `true` to return only slots containing a token.
-`isInitialized()` reports whether the instance is currently initialized.
+`getTokenInfo(slot)` returns parsed token information for the given slot or
+`null` if the call fails. `openSession(slot, rw = false)` opens a session and
+returns the session handle or `null` on failure. `closeSession(session)` closes
+a session. `findObjectsInit(session, types)`, `findObjects(session, maxCount)`
+and `findObjectsFinal(session)` perform object searches. `getAttributeValueSize`
+returns attribute value lengths. `isInitialized()` reports whether the instance
+is currently initialized.
 
 Without a path, the constructor searches common system library directories for
 a filename containing `pkcs11` with the platform extension (`.dylib`, `.so`,
